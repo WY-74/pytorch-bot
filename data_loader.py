@@ -3,9 +3,29 @@ import torch
 import torchvision
 from torch.utils.data import Dataset, DataLoader
 
-from utils.base import VOC_COLORMAP
-
-
+VOC_COLORMAP = [
+    [0, 0, 0],
+    [128, 0, 0],
+    [0, 128, 0],
+    [128, 128, 0],
+    [0, 0, 128],
+    [128, 0, 128],
+    [0, 128, 128],
+    [128, 128, 128],
+    [64, 0, 0],
+    [192, 0, 0],
+    [64, 128, 0],
+    [192, 128, 0],
+    [64, 0, 128],
+    [192, 0, 128],
+    [64, 128, 128],
+    [192, 128, 128],
+    [0, 64, 0],
+    [128, 64, 0],
+    [0, 192, 0],
+    [128, 192, 0],
+    [0, 64, 128],
+]
 _dataset_registry = {}
 
 
