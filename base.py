@@ -12,105 +12,6 @@ from PIL import Image
 from IPython import display
 from typing import Tuple, List
 
-import sys
-
-sys.path.append("./utils")
-
-from data_loader import load_dataset
-from train import train
-
-
-class Timer:
-    """记录多次运行时间"""
-
-    def __init__(self):
-        self.times = []
-        self.start()
-
-    def start(self):
-        """启动计时器"""
-        self.tik = time.time()
-
-    def stop(self):
-        """停止计时器并将时间记录在列表中"""
-        self.times.append(time.time() - self.tik)
-        return self.times[-1]
-
-    def avg(self):
-        """返回平均时间"""
-        return sum(self.times) / len(self.times)
-
-    def sum(self):
-        """返回时间总和"""
-        return sum(self.times)
-
-    def cumsum(self):
-        """返回累计时间"""
-        return np.array(self.times).cumsum().tolist()
-
-
-class Animator:
-    def __init__(
-        self,
-        nrows: int = 1,
-        ncols: int = 1,
-        figsize: Tuple[int | float, int | float] | None = None,
-        fmts: Tuple[str, ...] = ("-", "m--", "g-.", "r:"),
-        xlabel: str | None = None,
-        ylabel: str | None = None,
-        xlim: Tuple[float | None, float | None] = (None, None),
-        ylim: Tuple[float | None, float | None] = (None, None),
-        xscale: str = "linear",
-        yscale: str = "linear",
-        legend: List[str] | None = None,
-    ):
-        self.fig, self.axes = init_figsize(nrows, ncols, figsize=figsize)
-        if nrows * ncols == 1:
-            self.axes = [
-                self.axes,
-            ]
-        # 使用lambda函数捕获参数
-        self.config_axes = lambda: set_axes(self.axes[0], xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
-        self.X, self.Y, self.fmts = None, None, fmts
-
-    def add(self, x, y):
-        # 向图表中添加多个数据点
-        if not hasattr(y, "__len__"):
-            y = [y]
-        n = len(y)
-        if not hasattr(x, "__len__"):
-            x = [x] * n
-        if not self.X:
-            self.X = [[] for _ in range(n)]
-        if not self.Y:
-            self.Y = [[] for _ in range(n)]
-
-        for i, (a, b) in enumerate(zip(x, y)):
-            if a is not None and b is not None:
-                self.X[i].append(a)
-                self.Y[i].append(b)
-        self.axes[0].cla()
-        for x, y, fmt in zip(self.X, self.Y, self.fmts):
-            self.axes[0].plot(x, y, fmt)
-        self.config_axes()
-
-        display.display(self.fig)
-        display.clear_output(wait=True)
-
-
-class Accumulator:
-    def __init__(self, n):
-        self.data = [0.0] * n
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-    def add(self, *args):
-        self.data = [a + float(b) for a, b in zip(self.data, args)]
-
-    def reset(self):
-        self.data = [0.0] * len(self.data)
-
 
 def init_figsize(nrows: int = 1, ncols: int = 1, figsize: Tuple[int | float, int | float] | None = None):
     if figsize is None:
@@ -207,12 +108,12 @@ def evaluate_loss(net, data_iter, loss):
     """Evaluate the loss of a model on the given dataset.
 
     Defined in :numref:`sec_utils`"""
-    metric = d2l.Accumulator(2)  # Sum of losses, no. of examples
+    metric = Accumulator(2)  # Sum of losses, no. of examples
     for X, y in data_iter:
         out = net(X)
-        y = d2l.reshape(y, out.shape)
+        y.reshape(out.shape)
         l = loss(out, y)
-        metric.add(d2l.reduce_sum(l), d2l.size(l))
+        metric.add(l.sum(), l.numel())
     return metric[0] / metric[1]
 
 
@@ -250,3 +151,157 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             y = y.to(device)
             metric.add(metric.accuracy(net(X), y), y.numel())
     return metric[0] / metric[1]
+
+
+# 语言模型
+def tokenize(lines, token='word'):
+    if token == 'word':
+        return [line.split() for line in lines]
+    if token == "char":
+        return [list(line) for line in lines]
+    print('错误：未知词元类型：' + token)
+
+
+def count_corpus(tokens):
+    if len(tokens) == 0 or isinstance(tokens[0], list):
+        _tokens = []
+        for line in tokens:
+            for token in line:
+                _tokens.append(token)
+        tokens = _tokens
+    return collections.Counter(tokens)
+
+
+# 常用类
+class Vocab:
+    def __init__(self, tokens=None, min_freq=0, reserved_tokens=None):
+        if tokens is None:
+            tokens = []
+        if reserved_tokens is None:
+            reserved_tokens = []
+
+        # 按出现频率排序
+        counter = count_corpus(tokens)
+        self._token_freqs = sorted(counter.items(), key=lambda x: x[1], reverse=True)
+
+        self.idx_to_token = ['<unk>'] + reserved_tokens
+        self.token_to_idx = {token: idx for idx, token in enumerate(self.idx_to_token)}
+        for token, freq in self._token_freqs:
+            if freq < min_freq:
+                break
+            if token not in self.token_to_idx:
+                self.idx_to_token.append(token)
+                self.token_to_idx[token] = len(self.idx_to_token) - 1
+
+    def __len__(self):
+        return len(self.idx_to_token)
+
+    def __getitem__(self, tokens):
+        if not isinstance(tokens, (list, tuple)):
+            return self.token_to_idx.get(tokens, self.unk)
+        return [self.__getitem__(token) for token in tokens]
+
+    def to_tokens(self, indices):
+        if not isinstance(indices, (tuple, list)):
+            return self.idx_to_token[indices]
+        return [self.to_tokens(index) for index in indices]
+
+    @property
+    def unk(self):  # 未知词元的索引为0
+        return 0
+
+    @property
+    def token_freqs(self):
+        return self._token_freqs
+
+
+class Timer:
+    """记录多次运行时间"""
+
+    def __init__(self):
+        self.times = []
+        self.start()
+
+    def start(self):
+        """启动计时器"""
+        self.tik = time.time()
+
+    def stop(self):
+        """停止计时器并将时间记录在列表中"""
+        self.times.append(time.time() - self.tik)
+        return self.times[-1]
+
+    def avg(self):
+        """返回平均时间"""
+        return sum(self.times) / len(self.times)
+
+    def sum(self):
+        """返回时间总和"""
+        return sum(self.times)
+
+    def cumsum(self):
+        """返回累计时间"""
+        return np.array(self.times).cumsum().tolist()
+
+
+class Animator:
+    def __init__(
+        self,
+        nrows: int = 1,
+        ncols: int = 1,
+        figsize: Tuple[int | float, int | float] | None = None,
+        fmts: Tuple[str, ...] = ("-", "m--", "g-.", "r:"),
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        xlim: Tuple[float | None, float | None] = (None, None),
+        ylim: Tuple[float | None, float | None] = (None, None),
+        xscale: str = "linear",
+        yscale: str = "linear",
+        legend: List[str] | None = None,
+    ):
+        self.fig, self.axes = init_figsize(nrows, ncols, figsize=figsize)
+        if nrows * ncols == 1:
+            self.axes = [
+                self.axes,
+            ]
+        # 使用lambda函数捕获参数
+        self.config_axes = lambda: set_axes(self.axes[0], xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
+        self.X, self.Y, self.fmts = None, None, fmts
+
+    def add(self, x, y):
+        # 向图表中添加多个数据点
+        if not hasattr(y, "__len__"):
+            y = [y]
+        n = len(y)
+        if not hasattr(x, "__len__"):
+            x = [x] * n
+        if not self.X:
+            self.X = [[] for _ in range(n)]
+        if not self.Y:
+            self.Y = [[] for _ in range(n)]
+
+        for i, (a, b) in enumerate(zip(x, y)):
+            if a is not None and b is not None:
+                self.X[i].append(a)
+                self.Y[i].append(b)
+        self.axes[0].cla()
+        for x, y, fmt in zip(self.X, self.Y, self.fmts):
+            self.axes[0].plot(x, y, fmt)
+        self.config_axes()
+
+        display.display(self.fig)
+        display.clear_output(wait=True)
+
+
+class Accumulator:
+    def __init__(self, n):
+        self.data = [0.0] * n
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+    def add(self, *args):
+        self.data = [a + float(b) for a, b in zip(self.data, args)]
+
+    def reset(self):
+        self.data = [0.0] * len(self.data)
