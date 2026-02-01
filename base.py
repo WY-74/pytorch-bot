@@ -1,5 +1,9 @@
+import re
+import math
 import time
 import torch
+import random
+import collections
 import importlib
 from torch import nn
 import numpy as np
@@ -153,6 +157,14 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
     return metric[0] / metric[1]
 
 
+def sgd(params, lr, batch_size):
+    """小批量随机梯度下降"""
+    with torch.no_grad():
+        for param in params:
+            param -= lr * param.grad / batch_size
+            param.grad.zero_()
+
+
 # 语言模型
 def tokenize(lines, token='word'):
     if token == 'word':
@@ -170,6 +182,109 @@ def count_corpus(tokens):
                 _tokens.append(token)
         tokens = _tokens
     return collections.Counter(tokens)
+
+
+def read_timemachine():
+    with open("data/timemachine.txt") as f:
+        lines = f.readlines()
+    return [re.sub('[^A-Za-z]+', ' ', line).strip().lower() for line in lines]
+
+
+def load_corpus_time_machine(max_tokens=-1):
+    lines = read_timemachine()
+    tokens = tokenize(lines, token="char")
+    vocab = Vocab(tokens)
+
+    corpus = []
+    for line in lines:
+        for token in line:
+            corpus.append(vocab[token])
+
+    if max_tokens > 0:
+        corpus = corpus[:max_tokens]
+
+    return corpus, vocab
+
+
+def load_data_time_machine(batch_size, num_steps, use_random_iter=False, max_tokens=10000):
+    data_iter = SeqDataLoader(batch_size, num_steps, use_random_iter, max_tokens)
+    return data_iter, data_iter.vocab
+
+
+def grad_clipping(net, theta):
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+
+    norm = torch.sqrt(sum(torch.sum((p.grad**2)) for p in params))
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm
+
+
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+    state, timer = None, Timer()
+    metric = Accumulator(2)
+    for X, Y in train_iter:
+        if state is None or use_random_iter:
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+                state.detach_()
+            else:
+                for s in state:
+                    s.detach_()
+        y = Y.T.reshape(-1)
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss(y_hat, y.long()).mean()
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater(batch_size=1)
+        metric.add(l * y.numel(), y.numel())
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+
+
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False):
+    loss = nn.CrossEntropyLoss()
+    animator = Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda batch_size: sgd(net.params, lr, batch_size)
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+
+    for epoch in range(num_epochs):
+        ppl, speed = train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter)
+        if (epoch + 1) % 10 == 0:
+            print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])
+    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
+    print(predict('time traveller'))
+    print(predict('traveller'))
+
+
+def predict_ch8(prefix, num_preds, net, vocab, device):
+    state = net.begin_state(batch_size=1, device=device)
+
+    outputs = [vocab[prefix[0]]]
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
+    for y in prefix[1:]:
+        _, state = net(get_input(), state)
+        outputs.append(vocab[y])
+    for _ in range(num_preds):
+        logits, state = net(get_input(), state)
+        outputs.append(logits.argmax(dim=1).reshape(1))
+
+    return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 
 # 常用类
@@ -305,3 +420,48 @@ class Accumulator:
 
     def reset(self):
         self.data = [0.0] * len(self.data)
+
+
+class SeqDataLoader:
+    def __init__(self, batch_size, num_steps, use_random_iter, max_tokens):
+        if use_random_iter:
+            self.data_iter_fn = self._seq_data_iter_random
+        else:
+            self.data_iter_fn = self._seq_data_iter_sequential
+        self.corpus, self.vocab = load_corpus_time_machine(max_tokens)
+        self.batch_size, self.num_steps = batch_size, num_steps
+
+    def __iter__(self):
+        return self.data_iter_fn(self.corpus, self.batch_size, self.num_steps)
+
+    def _seq_data_iter_random(self, corpus, batch_size, num_steps):
+        corpus = corpus[random.randint(0, num_steps - 1) :]
+        num_subseqs = (len(corpus) - 1) // num_steps  # 减去1，是因为我们需要考虑标签
+
+        initial_indices = list(range(0, num_subseqs * num_steps, num_steps))
+        random.shuffle(initial_indices)
+
+        def data(pos):
+            return corpus[pos : pos + num_steps]
+
+        num_batches = num_subseqs // batch_size
+        for i in range(0, num_batches * batch_size, batch_size):
+            initial_indices_per_batch = initial_indices[i : i + batch_size]
+            X = [data(j) for j in initial_indices_per_batch]
+            Y = [data(j + 1) for j in initial_indices_per_batch]
+            yield torch.tensor(X), torch.tensor(Y)
+
+    def _seq_data_iter_sequential(self, corpus, batch_size, num_steps):
+        """
+        使用顺序分区生成一个小批量子序列
+        """
+        offset = random.randint(0, num_steps)
+        num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
+        Xs = torch.tensor(corpus[offset : offset + num_tokens])
+        Ys = torch.tensor(corpus[offset + 1 : offset + 1 + num_tokens])
+        Xs, Ys = Xs.reshape(batch_size, -1), Ys.reshape(batch_size, -1)
+        num_batches = Xs.shape[1] // num_steps
+        for i in range(0, num_steps * num_batches, num_steps):
+            X = Xs[:, i : i + num_steps]
+            Y = Ys[:, i : i + num_steps]
+            yield X, Y
