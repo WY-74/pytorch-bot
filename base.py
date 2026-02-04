@@ -4,17 +4,19 @@ import time
 import torch
 import random
 import collections
-import importlib
-from torch import nn
 import numpy as np
 
+from torch import nn
+from torch import Tensor
+from torch.nn import functional as F
+from PIL import Image
+from IPython import display
+from typing import Tuple, List, Optional
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib_inline import backend_inline
 
-from PIL import Image
-from IPython import display
-from typing import Tuple, List
+from utils.train import Train
 
 
 def init_figsize(nrows: int = 1, ncols: int = 1, figsize: Tuple[int | float, int | float] | None = None):
@@ -125,7 +127,7 @@ def try_all_gpus():
     """返回所有可用的GPU，如果没有GPU，则返回[]"""
     device_count = torch.cuda.device_count()
     if device_count == 0:
-        return []
+        return None
     return [torch.device(f'cuda:{i}') for i in range(device_count)]
 
 
@@ -223,57 +225,10 @@ def grad_clipping(net, theta):
             param.grad[:] *= theta / norm
 
 
-def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
-    state, timer = None, Timer()
-    metric = Accumulator(2)
-    for X, Y in train_iter:
-        if state is None or use_random_iter:
-            state = net.begin_state(batch_size=X.shape[0], device=device)
-        else:
-            if isinstance(net, nn.Module) and not isinstance(state, tuple):
-                state.detach_()
-            else:
-                for s in state:
-                    s.detach_()
-        y = Y.T.reshape(-1)
-        X, y = X.to(device), y.to(device)
-        y_hat, state = net(X, state)
-        l = loss(y_hat, y.long()).mean()
-        if isinstance(updater, torch.optim.Optimizer):
-            updater.zero_grad()
-            l.backward()
-            grad_clipping(net, 1)
-            updater.step()
-        else:
-            l.backward()
-            grad_clipping(net, 1)
-            updater(batch_size=1)
-        metric.add(l * y.numel(), y.numel())
-    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
-
-
-def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False):
-    loss = nn.CrossEntropyLoss()
-    animator = Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
-
-    if isinstance(net, nn.Module):
-        updater = torch.optim.SGD(net.parameters(), lr)
-    else:
-        updater = lambda batch_size: sgd(net.params, lr, batch_size)
-    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
-
-    for epoch in range(num_epochs):
-        ppl, speed = train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter)
-        if (epoch + 1) % 10 == 0:
-            print(predict('time traveller'))
-            animator.add(epoch + 1, [ppl])
-    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
-    print(predict('time traveller'))
-    print(predict('traveller'))
-
-
-def predict_ch8(prefix, num_preds, net, vocab, device):
-    state = net.begin_state(batch_size=1, device=device)
+def predict_ch8(prefix, num_preds, net, vocab):
+    device = next(net.parameters()).device
+    state = None
+    # state = net.begin_state(batch_size=1, device=device)
 
     outputs = [vocab[prefix[0]]]
     get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
@@ -287,7 +242,133 @@ def predict_ch8(prefix, num_preds, net, vocab, device):
     return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 
-# 常用类
+# 训练调用函数
+def train_ch8(net, train_iter, num_epochs, vocab, lr, use_random_iter=False):
+    loss = nn.CrossEntropyLoss()
+    if isinstance(net, nn.Module):
+        optimer = torch.optim.SGD(net.parameters(), lr)
+    else:
+        optimer = lambda batch_size: sgd(net.params, lr, batch_size)
+    metric = Accumulator(2)
+    animator = Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab)
+
+    TrainCh8(net, loss, optimer).run(
+        train_iter,
+        num_epochs,
+        test_iter="time traveller",
+        metric=metric,
+        animator=animator,
+        use_random_iter=use_random_iter,
+        vocab=vocab,
+    )
+
+    print(predict('time traveller'))
+    print(predict('traveller'))
+
+
+# 训练器
+class TrainCh8(Train):
+    def init_state(self, *args, **kwargs):
+        kwargs["state"] = None
+        return args, kwargs
+
+    def trainer(self, X, y, *args, **kwargs):
+        state = kwargs["state"]
+        use_random_iter = kwargs["use_random_iter"]
+
+        if use_random_iter:
+            state = None
+
+        y = y.T.reshape(-1)
+        y_hat, new_state = self.net(X, state)
+
+        l = self.loss(y_hat, y.long())
+
+        if new_state is not None:
+            if isinstance(new_state, tuple):
+                new_state = (new_state[0].detach(), new_state[1].detach())
+            else:
+                new_state = new_state.detach()
+        kwargs["state"] = new_state
+
+        return l, args, kwargs
+
+    def update_metric(self, metric, epoch, l, numel):
+        metric.add(l * numel, numel)
+
+    def predict(self, test_iter, *args, **kwargs):
+        vocab = kwargs["vocab"]
+
+        state = None
+        outputs = [vocab[test_iter[0]]]
+        get_input = lambda: torch.tensor([outputs[-1]], device=self.devices[0]).reshape((1, 1))
+        for y in test_iter[1:]:
+            _, state = self.net(get_input(), state)
+            outputs.append(vocab[y])
+        for _ in range(50):
+            logits, state = self.net(get_input(), state)
+            outputs.append(logits.argmax(dim=1).reshape(1))
+
+        print(''.join([vocab.idx_to_token[i] for i in outputs]))
+
+    def update_animator(self, animator, metric, epoch):
+        ppl = math.exp(metric[0] / metric[1])
+        if (epoch + 1) % 10 == 0:
+            animator.add(epoch + 1, [ppl])
+
+    def print_results(self, metric):
+        ppl = math.exp(metric[0] / metric[1])
+        speed = metric[1] / self.timer.sum()
+        print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(self.devices)}')
+
+
+# 常用 Model
+class RNN(nn.Module):
+    def __init__(self, rnn_layer, vocab_size, num_hiddens, **kwargs):
+        super().__init__()
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(num_hiddens, vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+
+    def forward(self, inputs, state: Optional[Tensor] = None):
+        X = F.one_hot(inputs.T.long(), self.vocab_size)
+        X = X.to(torch.float32)
+        Y, state = self.rnn(X, state)
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))  # input: torch.Size([num_steps*batch_size, vocab_size]);
+        return output, state
+
+
+class LSTM(nn.Module):
+    def __init__(self, rnn_layer, vocab_size, num_hiddens, **kwargs):
+        super().__init__()
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(num_hiddens, vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+
+    def forward(self, inputs, state: Optional[Tuple[Tensor, Tensor]] = None):
+        X = F.one_hot(inputs.T.long(), self.vocab_size)
+        X = X.to(torch.float32)
+        Y, state = self.rnn(X, state)
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))  # input: torch.Size([num_steps*batch_size, vocab_size]);
+        return output, state
+
+
+# 其余常用类
 class Vocab:
     def __init__(self, tokens=None, min_freq=0, reserved_tokens=None):
         if tokens is None:
@@ -328,35 +409,6 @@ class Vocab:
     @property
     def token_freqs(self):
         return self._token_freqs
-
-
-class Timer:
-    """记录多次运行时间"""
-
-    def __init__(self):
-        self.times = []
-        self.start()
-
-    def start(self):
-        """启动计时器"""
-        self.tik = time.time()
-
-    def stop(self):
-        """停止计时器并将时间记录在列表中"""
-        self.times.append(time.time() - self.tik)
-        return self.times[-1]
-
-    def avg(self):
-        """返回平均时间"""
-        return sum(self.times) / len(self.times)
-
-    def sum(self):
-        """返回时间总和"""
-        return sum(self.times)
-
-    def cumsum(self):
-        """返回累计时间"""
-        return np.array(self.times).cumsum().tolist()
 
 
 class Animator:
