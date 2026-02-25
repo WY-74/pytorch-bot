@@ -168,10 +168,10 @@ def sgd(params, lr, batch_size):
 
 
 # 语言模型
-def tokenize(lines, token='word'):
-    if token == 'word':
+def tokenize(lines, token_type='word'):
+    if token_type == 'word':
         return [line.split() for line in lines]
-    if token == "char":
+    if token_type == "char":
         return [list(line) for line in lines]
     print('错误：未知词元类型：' + token)
 
@@ -188,17 +188,20 @@ def count_corpus(tokens):
 
 def read_timemachine():
     with open("data/timemachine.txt") as f:
-        lines = f.readlines()
+        time_machine = f.readlines()
+    with open("data/the_war_of_the_worlds.txt") as f:
+        the_war_of_the_worlds = f.readlines()
+    lines = time_machine + the_war_of_the_worlds
     return [re.sub('[^A-Za-z]+', ' ', line).strip().lower() for line in lines]
 
 
-def load_corpus_time_machine(max_tokens=-1):
+def load_corpus_time_machine(max_tokens=-1, token_type="word"):
     lines = read_timemachine()
-    tokens = tokenize(lines, token="char")
+    tokens = tokenize(lines, token_type=token_type)
     vocab = Vocab(tokens)
 
     corpus = []
-    for line in lines:
+    for line in tokens:
         for token in line:
             corpus.append(vocab[token])
 
@@ -208,8 +211,8 @@ def load_corpus_time_machine(max_tokens=-1):
     return corpus, vocab
 
 
-def load_data_time_machine(batch_size, num_steps, use_random_iter=False, max_tokens=10000):
-    data_iter = SeqDataLoader(batch_size, num_steps, use_random_iter, max_tokens)
+def load_data_time_machine(batch_size, num_steps, use_random_iter=False, max_tokens=10000, token_type="word"):
+    data_iter = SeqDataLoader(batch_size, num_steps, use_random_iter, max_tokens, token_type=token_type)
     return data_iter, data_iter.vocab
 
 
@@ -225,11 +228,13 @@ def grad_clipping(net, theta):
             param.grad[:] *= theta / norm
 
 
-def predict_ch8(prefix, num_preds, net, vocab):
+def predict_ch8(prefix, num_preds, net, vocab, token_type="word"):
+    net.eval()
     device = next(net.parameters()).device
     state = None
-    # state = net.begin_state(batch_size=1, device=device)
 
+    if token_type == "word":
+        prefix = prefix.split()
     outputs = [vocab[prefix[0]]]
     get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
     for y in prefix[1:]:
@@ -239,93 +244,166 @@ def predict_ch8(prefix, num_preds, net, vocab):
         logits, state = net(get_input(), state)
         outputs.append(logits.argmax(dim=1).reshape(1))
 
-    return ''.join([vocab.idx_to_token[i] for i in outputs])
+    if token_type == "word":
+        return ' '.join([vocab.idx_to_token[i] for i in outputs])
+    else:
+        return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 
 # 训练调用函数
-def train_ch8(net, train_iter, num_epochs, vocab, lr, use_random_iter=False):
+def train_ch8(net, train_iter, num_epochs, vocab, lr, token_type="word"):
     loss = nn.CrossEntropyLoss()
-    if isinstance(net, nn.Module):
-        optimer = torch.optim.SGD(net.parameters(), lr)
-    else:
-        optimer = lambda batch_size: sgd(net.params, lr, batch_size)
-    metric = Accumulator(2)
-    animator = Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
-    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab)
+    optimizer = torch.optim.SGD(net.parameters(), lr)
 
-    TrainCh8(net, loss, optimer).run(
-        train_iter,
-        num_epochs,
-        test_iter="time traveller",
-        metric=metric,
-        animator=animator,
-        use_random_iter=use_random_iter,
-        vocab=vocab,
-    )
+    TrainCh8(net, loss, optimizer).train_epochs(train_iter, num_epochs, vocab, token_type=token_type)
 
-    print(predict('time traveller'))
-    print(predict('traveller'))
+
+def read_data_nmt():
+    with open("/root/autodl-tmp/d2l/dataset/fra-eng/fra.txt", "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def preprocess_nmt(text):
+    """预处理“英语－法语”数据集"""
+
+    def no_space(char, prev_char):
+        return char in set(',.!?') and prev_char != ' '
+
+    text = text.replace('\u202f', ' ').replace('\xa0', ' ').lower()
+    out = [f" {char}" if i > 0 and no_space(char, text[i - 1]) else char for i, char in enumerate(text)]
+
+    return ''.join(out)
+
+
+def tokenize_nmt(text, num_examples=None):
+    source, target = [], []
+    for i, line in enumerate(text.split('\n')):
+        if num_examples and i > num_examples:
+            break
+        parts = line.split('\t')
+        if len(parts) == 2:
+            source.append(parts[0].split(' '))
+            target.append(parts[-1].split(' '))
+
+    return source, target
+
+
+def truncate_pad(line, num_steps, padding_token):
+    """截断或填充文本序列"""
+    if len(line) > num_steps:
+        return line[:num_steps]
+    return line + [padding_token] * (num_steps - len(line))
+
+
+def build_array_nmt(lines, vocab, num_steps):
+    """将机器翻译的文本序列转换成小批量"""
+    lines = [vocab[l] for l in lines]
+    lines = [l + [vocab['<eos>']] for l in lines]
+    array = torch.tensor([truncate_pad(l, num_steps, vocab['<pad>']) for l in lines])
+    valid_len = (array != vocab['<pad>']).type(torch.int32).sum(1)
+
+    return array, valid_len
+
+
+def load_data_nmt(batch_size, num_steps, num_examples=600):
+    text = preprocess_nmt(read_data_nmt())
+    source, target = tokenize_nmt(text, num_examples=num_examples)
+    src_vocab = Vocab(source, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])
+    tgt_vocab = Vocab(target, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])
+
+    src_array, src_valid_len = build_array_nmt(source, src_vocab, num_steps)
+    tgt_array, tgt_valid_len = build_array_nmt(target, tgt_vocab, num_steps)
+    data_arrays = (src_array, src_valid_len, tgt_array, tgt_valid_len)
+    data_iter = load_array(data_arrays, batch_size)
+
+    return data_iter, src_vocab, tgt_vocab
 
 
 # 训练器
 class TrainCh8(Train):
-    def init_state(self, *args, **kwargs):
-        kwargs["state"] = None
-        return args, kwargs
+    def train_epochs(
+        self, train_iter, num_epochs, vocab, token_type="word", use_random_iter=False, grad_clipping_theta=1
+    ):
+        animator = Animator(xlabel='epoch', ylabel='m loss', legend=['train'], xlim=[10, num_epochs])
+        predict = lambda prefix: predict_ch8(prefix, 50, self.net, vocab, token_type)
+        for epoch in range(num_epochs):
+            self.net.train()
+            state, timer = None, Timer()
+            metric = Accumulator(2)
+            for X, Y in train_iter:
+                if use_random_iter:
+                    state = None
 
-    def trainer(self, X, y, *args, **kwargs):
-        state = kwargs["state"]
-        use_random_iter = kwargs["use_random_iter"]
+                if state is not None:
+                    if isinstance(state, tuple):
+                        for s in state:
+                            s.detach_()
+                    else:
+                        state.detach_()
 
-        if use_random_iter:
-            state = None
+                y = Y.T.reshape(-1)
+                X, y = X.to(self.devices[0]), y.to(self.devices[0])
+                y_hat, state = self.net(X, state)
+                l = self.loss(y_hat, y.long())
+                if isinstance(self.optimer, torch.optim.Optimizer):
+                    self.optimer.zero_grad()
+                    l.backward()
+                    self.grad_clipping(grad_clipping_theta)
+                    self.optimer.step()
+                else:
+                    l.backward()
+                    self.grad_clipping(grad_clipping_theta)
+                    self.optimer(batch_size=1)
 
-        y = y.T.reshape(-1)
-        y_hat, new_state = self.net(X, state)
+                metric.add(l * y.numel(), y.numel())
 
-        l = self.loss(y_hat, y.long())
-
-        if new_state is not None:
-            if isinstance(new_state, tuple):
-                new_state = (new_state[0].detach(), new_state[1].detach())
-            else:
-                new_state = new_state.detach()
-        kwargs["state"] = new_state
-
-        return l, args, kwargs
-
-    def update_metric(self, metric, epoch, l, numel):
-        metric.add(l * numel, numel)
-
-    def predict(self, test_iter, *args, **kwargs):
-        vocab = kwargs["vocab"]
-
-        state = None
-        outputs = [vocab[test_iter[0]]]
-        get_input = lambda: torch.tensor([outputs[-1]], device=self.devices[0]).reshape((1, 1))
-        for y in test_iter[1:]:
-            _, state = self.net(get_input(), state)
-            outputs.append(vocab[y])
-        for _ in range(50):
-            logits, state = self.net(get_input(), state)
-            outputs.append(logits.argmax(dim=1).reshape(1))
-
-        print(''.join([vocab.idx_to_token[i] for i in outputs]))
-
-    def update_animator(self, animator, metric, epoch):
-        ppl = math.exp(metric[0] / metric[1])
-        if (epoch + 1) % 10 == 0:
-            animator.add(epoch + 1, [ppl])
-
-    def print_results(self, metric):
-        ppl = math.exp(metric[0] / metric[1])
-        speed = metric[1] / self.timer.sum()
+            ppl, speed = math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+            if (epoch + 1) % 10 == 0:
+                print(predict('time traveller'))
+                animator.add(epoch + 1, [ppl])
         print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(self.devices)}')
+        print(predict('time traveller'))
+        print(predict('traveller'))
 
 
 # 常用 Model
-class RNN(nn.Module):
-    def __init__(self, rnn_layer, vocab_size, num_hiddens, **kwargs):
+class Encoder(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def forward(self, X, *args):
+        raise NotImplementedError
+
+
+class Decoder(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def init_state(self, enc_outputs, *args):
+        raise NotImplementedError
+
+    def forward(self, X, state):
+        raise NotImplementedError
+
+
+class EncoderDecoder(nn.Module):
+    """编码器-解码器架构的基类"""
+
+    def __init__(self, encoder, decoder, **kwargs):
+        super().__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, enc_X, dec_X, *args):
+        enc_outputs = self.encoder(enc_X, *args)
+        dec_state = self.decoder.init_state(enc_outputs, *args)
+        return self.decoder(dec_X, dec_state)
+
+
+class RNNModel(nn.Module):
+    """循环神经网络模型"""
+
+    def __init__(self, rnn_layer, vocab_size):
         super().__init__()
         self.rnn = rnn_layer
         self.vocab_size = vocab_size
@@ -333,38 +411,16 @@ class RNN(nn.Module):
 
         if not self.rnn.bidirectional:
             self.num_directions = 1
-            self.linear = nn.Linear(num_hiddens, vocab_size)
+            self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
         else:
             self.num_directions = 2
             self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
 
-    def forward(self, inputs, state: Optional[Tensor] = None):
+    def forward(self, inputs, state):
         X = F.one_hot(inputs.T.long(), self.vocab_size)
         X = X.to(torch.float32)
         Y, state = self.rnn(X, state)
-        output = self.linear(Y.reshape((-1, Y.shape[-1])))  # input: torch.Size([num_steps*batch_size, vocab_size]);
-        return output, state
-
-
-class LSTM(nn.Module):
-    def __init__(self, rnn_layer, vocab_size, num_hiddens, **kwargs):
-        super().__init__()
-        self.rnn = rnn_layer
-        self.vocab_size = vocab_size
-        self.num_hiddens = self.rnn.hidden_size
-
-        if not self.rnn.bidirectional:
-            self.num_directions = 1
-            self.linear = nn.Linear(num_hiddens, vocab_size)
-        else:
-            self.num_directions = 2
-            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
-
-    def forward(self, inputs, state: Optional[Tuple[Tensor, Tensor]] = None):
-        X = F.one_hot(inputs.T.long(), self.vocab_size)
-        X = X.to(torch.float32)
-        Y, state = self.rnn(X, state)
-        output = self.linear(Y.reshape((-1, Y.shape[-1])))  # input: torch.Size([num_steps*batch_size, vocab_size]);
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))
         return output, state
 
 
@@ -409,6 +465,35 @@ class Vocab:
     @property
     def token_freqs(self):
         return self._token_freqs
+
+
+class Timer:
+    """记录多次运行时间"""
+
+    def __init__(self):
+        self.times = []
+        self.start()
+
+    def start(self):
+        """启动计时器"""
+        self.tik = time.time()
+
+    def stop(self):
+        """停止计时器并将时间记录在列表中"""
+        self.times.append(time.time() - self.tik)
+        return self.times[-1]
+
+    def avg(self):
+        """返回平均时间"""
+        return sum(self.times) / len(self.times)
+
+    def sum(self):
+        """返回时间总和"""
+        return sum(self.times)
+
+    def cumsum(self):
+        """返回累计时间"""
+        return np.array(self.times).cumsum().tolist()
 
 
 class Animator:
@@ -475,12 +560,12 @@ class Accumulator:
 
 
 class SeqDataLoader:
-    def __init__(self, batch_size, num_steps, use_random_iter, max_tokens):
+    def __init__(self, batch_size, num_steps, use_random_iter, max_tokens, token_type="word"):
         if use_random_iter:
             self.data_iter_fn = self._seq_data_iter_random
         else:
             self.data_iter_fn = self._seq_data_iter_sequential
-        self.corpus, self.vocab = load_corpus_time_machine(max_tokens)
+        self.corpus, self.vocab = load_corpus_time_machine(max_tokens, token_type=token_type)
         self.batch_size, self.num_steps = batch_size, num_steps
 
     def __iter__(self):
