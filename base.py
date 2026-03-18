@@ -19,6 +19,10 @@ from matplotlib_inline import backend_inline
 from utils.train import Train
 
 
+def use_svg_display():
+    backend_inline.set_matplotlib_formats('svg')
+
+
 def init_figsize(nrows: int = 1, ncols: int = 1, figsize: Tuple[int | float, int | float] | None = None):
     if figsize is None:
         figsize = (3.5, 2.5)
@@ -258,19 +262,25 @@ def train_ch8(net, train_iter, num_epochs, vocab, lr, token_type="word"):
     TrainCh8(net, loss, optimizer).train_epochs(train_iter, num_epochs, vocab, token_type=token_type)
 
 
+# Attention模型数据读取
 def read_data_nmt():
     with open("/root/autodl-tmp/d2l/dataset/fra-eng/fra.txt", "r", encoding="utf-8") as f:
         return f.read()
 
 
 def preprocess_nmt(text):
-    """预处理“英语－法语”数据集"""
+    """预处理 "英语－法语" 数据集"""
 
     def no_space(char, prev_char):
         return char in set(',.!?') and prev_char != ' '
 
     text = text.replace('\u202f', ' ').replace('\xa0', ' ').lower()
-    out = [f" {char}" if i > 0 and no_space(char, text[i - 1]) else char for i, char in enumerate(text)]
+    out = []
+    for i, char in enumerate(text):
+        if i > 0 and no_space(char, text[i - 1]):
+            out.append(f" {char}")
+        else:
+            out.append(char)
 
     return ''.join(out)
 
@@ -278,7 +288,7 @@ def preprocess_nmt(text):
 def tokenize_nmt(text, num_examples=None):
     source, target = [], []
     for i, line in enumerate(text.split('\n')):
-        if num_examples and i > num_examples:
+        if num_examples and i >= num_examples:
             break
         parts = line.split('\t')
         if len(parts) == 2:
@@ -289,16 +299,26 @@ def tokenize_nmt(text, num_examples=None):
 
 
 def truncate_pad(line, num_steps, padding_token):
-    """截断或填充文本序列"""
+    """
+    截断或填充文本序列
+    Args:
+      - line: List[词元]
+    """
     if len(line) > num_steps:
         return line[:num_steps]
     return line + [padding_token] * (num_steps - len(line))
 
 
 def build_array_nmt(lines, vocab, num_steps):
-    """将机器翻译的文本序列转换成小批量"""
-    lines = [vocab[l] for l in lines]
-    lines = [l + [vocab['<eos>']] for l in lines]
+    """
+    将机器翻译的文本序列转换成小批量
+    Args:
+      - lines: List[List[词元, ...]]
+    """
+    lines = [vocab[l] for l in lines]  # 词元转为idx
+    lines = [l + [vocab['<eos>']] for l in lines]  # 为每一个样本加入<eos>标签
+    # array: torch.Size([len(lines), num_steps])
+    # valid_len: torch.Size([len(lines)])
     array = torch.tensor([truncate_pad(l, num_steps, vocab['<pad>']) for l in lines])
     valid_len = (array != vocab['<pad>']).type(torch.int32).sum(1)
 
@@ -306,10 +326,11 @@ def build_array_nmt(lines, vocab, num_steps):
 
 
 def load_data_nmt(batch_size, num_steps, num_examples=600):
+    """加载 "英语-法语" 数据集"""
     text = preprocess_nmt(read_data_nmt())
     source, target = tokenize_nmt(text, num_examples=num_examples)
-    src_vocab = Vocab(source, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])
-    tgt_vocab = Vocab(target, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])
+    src_vocab = Vocab(source, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])  # 单词为词元
+    tgt_vocab = Vocab(target, min_freq=2, reserved_tokens=['<pad>', '<bos>', '<eos>'])  # 单词为词元
 
     src_array, src_valid_len = build_array_nmt(source, src_vocab, num_steps)
     tgt_array, tgt_valid_len = build_array_nmt(target, tgt_vocab, num_steps)
@@ -319,7 +340,139 @@ def load_data_nmt(batch_size, num_steps, num_examples=600):
     return data_iter, src_vocab, tgt_vocab
 
 
+def show_heatmaps(matrices, xlabel, ylabel, titles=None, figsize=(2.5, 2.5), cmap='Reds'):
+    """
+    matrices: torch.Size([要显示的行数, 要显示的列数, 查询的数目, 键的数目])
+    """
+    use_svg_display()
+    num_rows, num_cols = matrices.shape[0], matrices.shape[1]
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=figsize, sharex=True, sharey=True, squeeze=False)
+    for i, (row_axes, row_matrices) in enumerate(zip(axes, matrices)):
+        for j, (ax, matrix) in enumerate(zip(row_axes, row_matrices)):
+            pcm = ax.imshow(matrix.detach().numpy(), cmap=cmap)
+            if i == num_rows - 1:
+                ax.set_xlabel(xlabel)
+            if j == 0:
+                ax.set_ylabel(ylabel)
+            if titles:
+                ax.set_title(titles[j])
+    fig.colorbar(pcm, ax=axes, shrink=0.6)
+
+
+def sequence_mask(X, valid_len, value=0):
+    """在序列中屏蔽不相关的项"""
+    maxlen = X.size(1)
+    mask = torch.arange((maxlen), dtype=torch.float32, device=X.device)[None, :] < valid_len[:, None]
+    X[~mask] = value
+    return X
+
+
+def train_seq2seq(net, train_iter, num_epochs, tgt_vocab, lr):
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    loss = MaskedSoftmaxCELoss()
+    TrainSeq2Seq(net, loss, optimizer).train_epochs(train_iter, num_epochs, tgt_vocab)
+
+
+def predict_seq2seq(
+    net,
+    src_sentence,
+    src_vocab,
+    tgt_vocab,
+    num_steps,
+    device,
+    save_attention_weights=False,
+    remove_heads_idx: None | int = None,
+):
+    net.eval()
+    src_tokens = src_vocab[src_sentence.lower().split(' ')] + [src_vocab['<eos>']]
+    enc_valid_len = torch.tensor([len(src_tokens)], device=device)
+    src_tokens = truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
+    enc_X = torch.unsqueeze(torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
+    enc_outputs = net.encoder(enc_X, enc_valid_len)
+
+    dec_state = net.decoder.init_state(enc_outputs, enc_valid_len, remove_heads_idx)
+    dec_X = torch.unsqueeze(torch.tensor([tgt_vocab["<bos>"]], dtype=torch.long, device=device), dim=0)
+    output_seq, attention_weight_seq = [], []
+    for step in range(num_steps):
+        Y, dec_state = net.decoder(dec_X, dec_state, step)
+        dec_X = Y.argmax(dim=2)
+        pred = dec_X.squeeze(dim=0).type(torch.int32).item()
+        if save_attention_weights:
+            attention_weight_seq.append(net.decoder.attention_weights)
+        if pred == tgt_vocab['<eos>']:
+            break
+        output_seq.append(pred)
+    return " ".join(tgt_vocab.to_tokens(output_seq)), attention_weight_seq
+
+
+def bleu(pred_seq, label_seq, k):
+    pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
+    len_pred, len_label = len(pred_tokens), len(label_tokens)
+    score = math.exp(min(0, 1 - (len_label / len_pred)))
+    for n in range(1, k + 1):
+        num_matches, label_subs = 0, collections.defaultdict(int)
+        for i in range(len_label - n + 1):
+            label_subs[' '.join(label_tokens[i : i + n])] += 1
+        for i in range(len_pred - n + 1):
+            if label_subs[' '.join(pred_tokens[i : i + n])] > 0:
+                num_matches += 1
+                label_subs[' '.join(pred_tokens[i : i + n])] -= 1
+        score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
+    return score
+
+
+class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+    def forward(self, pred, label, valid_len):
+        """
+        pred.shape is (BatchSize, NumSteps, VocabSize)
+        label.shape is (BatchSize, NumSteps)
+        """
+        weights = torch.ones_like(label)
+        weights = sequence_mask(weights, valid_len)
+        self.reduction = 'none'
+        unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(pred.permute(0, 2, 1), label)
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)
+        return weighted_loss
+
+
 # 训练器
+class TrainSeq2Seq(Train):
+    def init_weights(self, m):
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.GRU or type(m) == nn.LSTM:
+            for name, param in m.named_parameters():
+                if "weight" in name:
+                    nn.init.xavier_uniform_(param)
+
+    def train_epochs(self, data_iter, num_epochs, tgt_vocab):
+        animator = Animator(xlabel='epoch', ylabel='loss', xlim=[10, num_epochs])
+        for epoch in range(num_epochs):
+            timer = Timer()
+            metric = Accumulator(2)
+            self.net.train()
+
+            # batch: Tuple[src_array, src_valid_len, tgt_array, tgt_valid_len]
+            # src_array, src_valid_len: torch.Size([BatchSize, NumSteps]), torch.Size([BatchSize])
+            # tgt_array, tgt_valid_len: torch.Size([BatchSize, NumSteps]), torch.Size([BatchSize])
+            for batch in data_iter:
+                self.optimizer.zero_grad()
+                X, X_valid_len, Y, Y_valid_len = [x.to(self.devices[0]) for x in batch]
+                bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0], device=self.devices[0]).reshape(-1, 1)
+                dec_input = torch.cat([bos, Y[:, :-1]], dim=1)
+                Y_hat, _ = self.net(X, dec_input, X_valid_len)
+                l = self.loss(Y_hat, Y, Y_valid_len)
+                l.sum().backward()
+                grad_clipping(self.net, 1)
+                num_tokens = Y_valid_len.sum()
+                self.optimizer.step()
+                with torch.no_grad():
+                    metric.add(l.sum(), num_tokens)
+            if (epoch + 1) % 10 == 0:
+                animator.add(epoch + 1, (metric[0] / metric[1],))
+        print(f'loss {metric[0] / metric[1]:.3f}, {metric[1] / timer.stop():.1f} ' f'tokens/sec on {str(self.devices)}')
+
+
 class TrainCh8(Train):
     def train_epochs(
         self, train_iter, num_epochs, vocab, token_type="word", use_random_iter=False, grad_clipping_theta=1
@@ -395,9 +548,36 @@ class EncoderDecoder(nn.Module):
         self.decoder = decoder
 
     def forward(self, enc_X, dec_X, *args):
+        """
+        Args:
+          - enc_X: torch.Size([BatchSize, NumSteps])
+          - dec_X: torch.Size([BatchSize, NumSteps])
+        """
         enc_outputs = self.encoder(enc_X, *args)
         dec_state = self.decoder.init_state(enc_outputs, *args)
         return self.decoder(dec_X, dec_state)
+
+
+class Seq2SeqEncoder(Encoder):
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers, dropout=0, **kwargs):
+        super().__init__(**kwargs)
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.LSTM(embed_size, num_hiddens, num_layers, dropout=dropout)
+
+    def forward(self, X, *args):
+        """
+        Args:
+          - X: torch.Size([BatchSize, NumSteps])
+        Return:
+          - output: torch.Size([NumSteps, BatchSize, num_hiddens])
+          - state:
+              - GRU: torch.Size([num_layers, BatchSize, num_hiddens])
+              - LSTM: Tuple[torch.Size([num_layers, BatchSize, num_hiddens]), torch.Size([num_layers, BatchSize, num_hiddens])]
+        """
+        X = self.embedding(X)  # torch.Size([BatchSize, NumSteps, embed_size])
+        X = X.permute(1, 0, 2)  # torch.Size([NumSteps, BatchSize, embed_size])
+        output, state = self.rnn(X)
+        return output, state
 
 
 class RNNModel(nn.Module):
