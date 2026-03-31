@@ -21,12 +21,13 @@ class Train:
             net = torch.jit.script(net)
 
         self.devices = self._try_all_gpus()
+        self.device = self.devices[0] if self.devices is not None else "cpu"
         if self.devices is not None:
             if len(self.devices) > 1:
-                net = net.to(self.devices[0])
+                net = net.to(self.device)
                 net = nn.DataParallel(net, device_ids=self.devices)
             else:
-                net = net.to(self.devices[0])
+                net = net.to(self.device)
         else:
             self.devices = ["cpu"]
         return net

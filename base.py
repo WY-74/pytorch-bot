@@ -55,6 +55,19 @@ def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5):
     return axes
 
 
+def show_list_len_pair_hist(legend, xlabel, ylabel, xlist, ylist):
+    """Plot the histogram for list length pairs.
+
+    Defined in :numref:`sec_machine_translation`"""
+    set_figsize()
+    _, _, patches = plt.hist([[len(l) for l in xlist], [len(l) for l in ylist]])
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    for patch in patches[1].patches:
+        patch.set_hatch('/')
+    plt.legend(legend)
+
+
 def plot(
     X,
     Y=None,
