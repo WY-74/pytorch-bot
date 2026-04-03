@@ -27,6 +27,7 @@ def _read_wiki():
         for line in lines
         if len(nltk.tokenize.sent_tokenize(line)) >= 2
     ]
+    # paragraphs = [line.strip().lower().split(' . ') for line in lines if len(line.split(' . ')) >= 2]
     random.shuffle(paragraphs)
     return paragraphs
 
@@ -216,7 +217,7 @@ class MaskLM(nn.Module):
 class NextSentencePred(nn.Module):
     """BERT的下一句预测任务"""
 
-    def __init__(self, num_inputs=768, **kwargs):
+    def __init__(self, num_hiddens, num_inputs=768, **kwargs):
         super().__init__()
         self.mlp = nn.Sequential(nn.Linear(num_inputs, num_hiddens), nn.Tanh(), nn.Linear(num_hiddens, 2))
 
@@ -245,7 +246,7 @@ class BERTModel(nn.Module):
         nsp_in_features=768,
     ):
         super().__init__()
-        self.encoder = bert.BERTEncoder(
+        self.encoder = BERTEncoder(
             vocab_size,
             num_hiddens,
             norm_shape,
@@ -260,7 +261,7 @@ class BERTModel(nn.Module):
             value_size=value_size,
         )
         self.mlm = MaskLM(vocab_size, num_hiddens, mlm_in_features)
-        self.nsp = NextSentencePred(nsp_in_features)
+        self.nsp = NextSentencePred(num_hiddens, nsp_in_features)
 
     def forward(self, tokens, segments, valid_lens=None, pred_positions=None):
         encoded_X = self.encoder(tokens, segments, valid_lens)
