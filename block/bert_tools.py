@@ -217,12 +217,12 @@ class MaskLM(nn.Module):
 class NextSentencePred(nn.Module):
     """BERT的下一句预测任务"""
 
-    def __init__(self, num_hiddens, num_inputs=768, **kwargs):
+    def __init__(self, num_inputs=768, **kwargs):
         super().__init__()
-        self.mlp = nn.Sequential(nn.Linear(num_inputs, num_hiddens), nn.Tanh(), nn.Linear(num_hiddens, 2))
+        self.output = nn.Linear(num_inputs, 2)
 
     def forward(self, X):
-        return self.mlp(X)
+        return self.output(X)
 
 
 class BERTModel(nn.Module):
@@ -242,6 +242,7 @@ class BERTModel(nn.Module):
         key_size=768,
         query_size=768,
         value_size=768,
+        hid_in_features=768,
         mlm_in_features=768,
         nsp_in_features=768,
     ):
@@ -260,8 +261,9 @@ class BERTModel(nn.Module):
             key_size=key_size,
             value_size=value_size,
         )
+        self.hidden = nn.Sequential(nn.Linear(hid_in_features, num_hiddens), nn.Tanh())
         self.mlm = MaskLM(vocab_size, num_hiddens, mlm_in_features)
-        self.nsp = NextSentencePred(num_hiddens, nsp_in_features)
+        self.nsp = NextSentencePred(nsp_in_features)
 
     def forward(self, tokens, segments, valid_lens=None, pred_positions=None):
         encoded_X = self.encoder(tokens, segments, valid_lens)
@@ -269,7 +271,7 @@ class BERTModel(nn.Module):
             mlm_Y_hat = self.mlm(encoded_X, pred_positions)
         else:
             mlm_Y_hat = None
-        nsp_Y_hat = self.nsp(encoded_X[:, 0, :])
+        nsp_Y_hat = self.nsp(self.hidden(encoded_X[:, 0, :]))
         return encoded_X, mlm_Y_hat, nsp_Y_hat
 
 

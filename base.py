@@ -172,7 +172,7 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             else:
                 X = X.to(device)
             y = y.to(device)
-            metric.add(metric.accuracy(net(X), y), y.numel())
+            metric.add(accuracy(net(X), y), y.numel())
     return metric[0] / metric[1]
 
 
@@ -795,3 +795,53 @@ class SeqDataLoader:
             X = Xs[:, i : i + num_steps]
             Y = Ys[:, i : i + num_steps]
             yield X, Y
+
+
+class TrainCh13(Train):
+    def init_weights(self, m):
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.LSTM:
+            for param in m._flat_weights_names:
+                if "weight" in param:
+                    nn.init.xavier_uniform_(m._parameters[param])
+
+    def train_epochs(self, num_epochs, train_iter, test_iter):
+        timer, num_batches = Timer(), len(train_iter)
+        animator = Animator(
+            xlabel='epoch', xlim=[1, num_epochs], ylim=[0, 1], legend=['train loss', 'train acc', 'test acc']
+        )
+        for epoch in range(num_epochs):
+            self.net.train()
+            metric = Accumulator(4)
+            for i, (features, labels) in enumerate(train_iter):
+                timer.start()
+                if isinstance(features, list):
+                    X = [x.to(self.device) for x in features]
+                else:
+                    X = features.to(self.device)
+                y = labels.to(self.device)
+                self.optimizer.zero_grad()
+                pred = self.net(X)
+                l = self.loss(pred, y)
+                l.sum().backward()
+                self.optimizer.step()
+
+                train_loss_sum = l.sum()
+                train_acc_sum = accuracy(pred, y)
+                metric.add(train_loss_sum, train_acc_sum, labels.shape[0], labels.numel())
+                timer.stop()
+
+                if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
+                    animator.add(epoch + (i + 1) / num_batches, (metric[0] / metric[2], metric[1] / metric[3], None))
+            test_acc = evaluate_accuracy_gpu(self.net, test_iter, self.device)
+            animator.add(epoch + 1, (None, None, test_acc))
+
+        print(f'loss {metric[0] / metric[2]:.3f}, train acc ' f'{metric[1] / metric[3]:.3f}, test acc {test_acc:.3f}')
+        print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on ' f'{str(self.devices)}')
+
+
+def train_ch13(net, lr, num_epochs, train_iter, test_iter):
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    loss = nn.CrossEntropyLoss(reduction="none")
+    TrainCh13(net, loss, optimizer).train_epochs(num_epochs, train_iter, test_iter)

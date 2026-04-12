@@ -247,7 +247,7 @@ class EncoderBlock(nn.Module):
         self.attention = MultiHeadAttention(query_size, key_size, value_size, num_hiddens, num_heads, dropout, use_bias)
         self.addnorm1 = AddNorm(norm_shape, dropout)
         self.ffn = PositionWiseFFN(ffn_num_input, ffn_num_hiddens, num_hiddens)
-        self.addnrom2 = AddNorm(norm_shape, dropout)
+        self.addnorm2 = AddNorm(norm_shape, dropout)
 
     def forward(self, X, valid_lens):
         """
