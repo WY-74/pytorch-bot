@@ -258,7 +258,7 @@ class EncoderBlock(nn.Module):
           - torch.Size([BatchSize, NumSteps, num_hiddens])
         """
         Y = self.addnorm1(X, self.attention(X, X, X, valid_lens))  # torch.Size([BatchSize, NumSteps, num_hiddens])
-        return self.addnrom2(Y, self.ffn(Y))
+        return self.addnorm2(Y, self.ffn(Y))
 
 
 class DecoderBlock(nn.Module):

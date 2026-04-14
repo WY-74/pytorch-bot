@@ -808,6 +808,7 @@ class TrainCh13(Train):
 
     def train_epochs(self, num_epochs, train_iter, test_iter):
         timer, num_batches = Timer(), len(train_iter)
+        # scaler = torch.cuda.amp.GradScaler()
         animator = Animator(
             xlabel='epoch', xlim=[1, num_epochs], ylim=[0, 1], legend=['train loss', 'train acc', 'test acc']
         )
@@ -821,6 +822,7 @@ class TrainCh13(Train):
                 else:
                     X = features.to(self.device)
                 y = labels.to(self.device)
+
                 self.optimizer.zero_grad()
                 pred = self.net(X)
                 l = self.loss(pred, y)
