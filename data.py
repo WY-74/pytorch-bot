@@ -2,6 +2,8 @@ import re
 import os
 import spacy
 import torch
+import torchvision
+from torchvision import transforms
 from utils import base
 
 
@@ -120,3 +122,16 @@ def load_data_snli(batch_size, num_steps=50):
     test_iter = torch.utils.data.DataLoader(test_set, batch_size, shuffle=False, num_workers=num_workers)
 
     return train_iter, test_iter, train_set.vocab
+
+
+def load_data_fashion_mnist(batch_size, resize=None):
+    trans = [transforms.ToTensor()]
+    if resize:
+        trans.insert(0, transforms.Resize(resize))
+    trans = transforms.Compose(trans)
+    mnist_train = torchvision.datasets.FashionMNIST(root="../data", train=True, transform=trans, download=True)
+    mnist_test = torchvision.datasets.FashionMNIST(root="../data", train=False, transform=trans, download=True)
+    return (
+        torch.utils.data.DataLoader(mnist_train, batch_size, shuffle=True, num_workers=os.cpu_count() // 2),
+        torch.utils.data.DataLoader(mnist_test, batch_size, shuffle=False, num_workers=os.cpu_count() // 2),
+    )
